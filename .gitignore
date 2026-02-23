@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+src/deprecated/
+sent/
+scripts/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Database (local data)
+*.db
+*.sqlite3
+
+# PyInstaller
+*.spec.bak
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sent messages (symlink to user home)
+sent
+
+# Local notes (optional - remove this line to include notes.txt)
+notes.txt
+*.pdf
+run_kiss_proxy.sh
