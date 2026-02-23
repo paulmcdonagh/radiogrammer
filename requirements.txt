@@ -1,0 +1,9 @@
+annotated-types==0.7.0
+charset-normalizer==3.4.4
+pillow==12.1.0
+pydantic==2.12.5
+pydantic_core==2.41.5
+pypdf==6.5.0
+reportlab==4.4.7
+typing-inspection==0.4.2
+typing_extensions==4.15.0

@@ -1,0 +1,20 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Radiogrammer
+Comment=NTS Radiogram Relay Application for APRS
+Exec=/usr/local/bin/radiogrammer
+Icon=radiogrammer
+Terminal=false
+Categories=HamRadio;Network;
+Keywords=radio;amateur;aprs;nts;radiogram;
+
+# To install this desktop file:
+# 1. Copy executable to: sudo cp radiogrammer /usr/local/bin/
+# 2. Copy this file to: sudo cp radiogrammer.desktop /usr/share/applications/
+# 3. Update desktop database: sudo update-desktop-database
+#
+# Or for user-only install:
+# 1. Copy executable to: mkdir -p ~/.local/bin && cp radiogrammer ~/.local/bin/
+# 2. Copy this file to: mkdir -p ~/.local/share/applications && cp radiogrammer.desktop ~/.local/share/applications/
+# 3. Update: update-desktop-database ~/.local/share/applications/
