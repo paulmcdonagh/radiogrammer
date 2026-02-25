@@ -967,6 +967,15 @@ class RadiogramUI(ttk.Frame):
     def _show_decision_panel(self, info: dict):
         """Show the decision panel with info about the failed ACK."""
         self.decision_info = info
+
+        # Update the frame title to reflect which phase failed so the operator
+        # knows whether the QTC itself was missed or just the "Ready to copy".
+        phase = info.get("phase", "")
+        if phase == "ready_to_copy":
+            self.decision_frame.configure(text="⚠ 'Ready to copy' not received")
+        else:
+            self.decision_frame.configure(text="⚠ ACK Not Received")
+
         self.decision_line_var.set(info.get("line", ""))
         self.decision_msgid_var.set(f"Message ID: {info.get('msgid', '')} (with braces)")
         self.decision_attempts_var.set(

@@ -64,6 +64,7 @@ class NTSGTESimulator:
         drop_prob: float = 0.0,
         drop_ack_prob: Optional[float] = None,
         drop_reply_prob: Optional[float] = None,
+        drop_ready_to_copy_prob: Optional[float] = None,
     ):
         self.kiss = kiss
         self.service_call = service_call.upper()
@@ -77,8 +78,14 @@ class NTSGTESimulator:
         # - drop_prob is a global default
         # - drop_ack_prob applies to "ackxxxxx"
         # - drop_reply_prob applies to Ready/Roger/73/INFO replies
+        # - drop_ready_to_copy_prob applies only to the "Ready to copy" QTC reply;
+        #   when set, overrides the normal bypass that always sends Ready-to-copy.
+        #   Use this to specifically test Phase B (Ready to copy) failure handling.
         self.drop_ack_prob = float(drop_prob if drop_ack_prob is None else drop_ack_prob)
         self.drop_reply_prob = float(drop_prob if drop_reply_prob is None else drop_reply_prob)
+        self.drop_ready_to_copy_prob: Optional[float] = (
+            None if drop_ready_to_copy_prob is None else float(drop_ready_to_copy_prob)
+        )
 
         self.to_service = callsign_regex(self.service_call)
         self.sessions: Dict[str, Session] = {}
@@ -185,15 +192,21 @@ class NTSGTESimulator:
 
             rid = gen_msgid()
 
-            # Make sure the Ready-to-copy gets sent (not dropped)
-            temp_set_prob = self.drop_reply_prob
-            self.drop_reply_prob = 0.0 
+            # Normally we force Ready-to-copy through (NTSGTE always replies to QTC).
+            # If drop_ready_to_copy_prob is set, use that probability instead so
+            # callers can specifically test Phase B (Ready to copy) drop handling.
+            if self.drop_ready_to_copy_prob is not None:
+                p = self.drop_ready_to_copy_prob
+                dropped = (p >= 1.0) or (p > 0.0 and random.random() < p)
+                if dropped:
+                    if self.verbose:
+                        print(f"[SIM] DROP Ready-to-copy -> {sender} (drop_ready_to_copy_prob={p})")
+                    return
             sent = self._send_msg(to_call=sender, text=f"Ready to copy {number} radiogram", msgid=rid)
             if sent:
                 sess.pending_acks.add(rid)
                 if self.verbose:
                     print(f"[SIM] TX Ready-to-copy{{{rid}}}")
-            self.drop_reply_prob = temp_set_prob
             return
 
         # INFO / CLEAR
@@ -299,9 +312,15 @@ def main():
     ap.add_argument("--ax25-dest", default="APK005")
     ap.add_argument("--digis", default="", help="Comma-separated digis, e.g. 'WIDE1-1,WIDE2-1' (blank=none)")
     ap.add_argument("--processing-delay", type=float, default=2.0, help="Seconds to sleep before responding")
-    ap.add_argument("--drop-prob", type=float, default=0.1, help="Default drop probability for *any* outbound reply")
+    ap.add_argument("--drop-prob", type=float, default=0.9, help="Default drop probability for *any* outbound reply")
     ap.add_argument("--drop-ack-prob", type=float, default=0.4, help="Drop probability for ACK replies (overrides --drop-prob)")
     ap.add_argument("--drop-reply-prob", type=float, default=None, help="Drop probability for non-ACK replies (overrides --drop-prob)")
+    ap.add_argument(
+        "--drop-ready-to-copy-prob", type=float, default=1.0,
+        help="Drop probability specifically for the 'Ready to copy' QTC reply (0.0–1.0). "
+             "Overrides the normal behaviour where Ready-to-copy is always sent. "
+             "Use 1.0 to guarantee Phase B failure for testing.",
+    )
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -309,7 +328,11 @@ def main():
     kiss.connect()
 
     try:
-        print(f"Drop probs: ACKs={args.drop_ack_prob if args.drop_ack_prob is not None else args.drop_prob}%, Replies={args.drop_reply_prob if args.drop_reply_prob is not None else args.drop_prob}%")
+        print(
+            f"Drop probs: ACKs={args.drop_ack_prob if args.drop_ack_prob is not None else args.drop_prob}, "
+            f"Replies={args.drop_reply_prob if args.drop_reply_prob is not None else args.drop_prob}, "
+            f"ReadyToCopy={args.drop_ready_to_copy_prob if args.drop_ready_to_copy_prob is not None else '(normal — always sent)'}"
+        )
         sim = NTSGTESimulator(
             kiss,
             service_call=args.service_call,
@@ -320,6 +343,7 @@ def main():
             drop_prob=args.drop_prob,
             drop_ack_prob=args.drop_ack_prob,
             drop_reply_prob=args.drop_reply_prob,
+            drop_ready_to_copy_prob=args.drop_ready_to_copy_prob,
         )
         sim.run_forever()
     finally:

@@ -243,12 +243,29 @@ class KissTcpClient:
         if not self.sock:
             raise RuntimeError("KISS socket not connected")
 
+        # Initial read: block up to the socket timeout waiting for new data.
         try:
             data = self.sock.recv(4096)
             if data:
                 self._rxbuf.extend(data)
         except socket.timeout:
             pass
+
+        # Non-blocking drain: if multiple frames arrived simultaneously (e.g. an
+        # ACK and a Roger arriving in the same TCP window), collect them all now
+        # rather than leaving them for the next poll cycle 0.5 s later.
+        self.sock.settimeout(0)
+        try:
+            while True:
+                try:
+                    chunk = self.sock.recv(4096)
+                    if not chunk:
+                        break
+                    self._rxbuf.extend(chunk)
+                except (BlockingIOError, socket.timeout, OSError):
+                    break
+        finally:
+            self.sock.settimeout(0.5)
 
         frames: List[Ax25UIFrame] = []
 

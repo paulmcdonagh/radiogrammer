@@ -241,6 +241,7 @@ def qtc_handshake(
     if not ok:
         log(f"FAIL: no ack for msgid {qtc.msgid} after {max_tries} attempts")
         return ("await_user", {
+            "phase": "qtc_ack",
             "line": qtc.payload,
             "msgid": qtc.msgid,
             "attempts": max_tries,
@@ -259,6 +260,7 @@ def qtc_handshake(
         ):
             log("FAIL: did not receive 'Ready to copy ...' from NTSGTE")
             return ("await_user", {
+                "phase": "ready_to_copy",
                 "line": "Ready to copy",
                 "msgid": "N/A",
                 "attempts": 1,
@@ -309,6 +311,19 @@ def send_one_line(
             rxbuf=rxbuf,
             timeout=ack_timeout,
         )
+
+        # ACK any messages from NTSGTE that arrived while we were waiting
+        # (e.g. Roger, 73, or early retransmits).  Do this whether or not
+        # our own ACK was found so NTSGTE does not have to retransmit them.
+        _ack_pending_inbound(
+            kiss,
+            my_call=my_call,
+            ax25_dest=ax25_dest,
+            digis=digis,
+            log=log,
+            rxbuf=rxbuf,
+        )
+
         if ok:
             log(f"OK: ack{line.msgid} on attempt {attempt}")
             return ("ok", {})
@@ -328,6 +343,55 @@ def send_one_line(
         "attempts": max_tries,
         "timeout": ack_timeout,
     })
+
+
+def _ack_pending_inbound(
+    kiss: KissTcpClient,
+    *,
+    my_call: str,
+    ax25_dest: str,
+    digis: List[str],
+    log: LogFn,
+    rxbuf: list[Any],
+) -> None:
+    """
+    Poll for any newly arrived frames, then scan rxbuf for messages addressed
+    to us that carry a msgid and are not themselves ACKs.  ACK each one once
+    and remove it from rxbuf.
+
+    Call this after each send_one_line() attempt so that NTSGTE does not have
+    to retransmit Roger/73/confirmations that arrived while we were waiting for
+    our own line ACK.
+    """
+    to_me = my_callsign_regex(my_call)
+    acked: set[str] = set()
+
+    # Pull any newly arrived frames into rxbuf first.
+    rxbuf.extend(kiss.poll_aprs_messages())
+
+    keep: list[Any] = []
+    for m in rxbuf:
+        if not to_me.match(m.addressee9):
+            keep.append(m)
+            continue
+
+        base_text, mid = split_base_and_msgid(m.text, getattr(m, "msgid", None))
+        if mid and mid not in acked and not base_text.strip().lower().startswith("ack"):
+            _tx_ack(
+                kiss,
+                my_call=my_call,
+                ax25_dest=ax25_dest,
+                digis=digis,
+                msgid=mid,
+                log=log,
+            )
+            acked.add(mid)
+            log(f"RX: {base_text!r} -> ACKed {mid}")
+        else:
+            keep.append(m)
+
+    rxbuf.clear()
+    rxbuf.extend(keep)
 
 
 def drain_and_ack_anything_to_me(
@@ -397,49 +461,96 @@ def relay_outbox_file(
 
     log(f"Relaying file: {path.name}")
 
-    # Handshake for 1 radiogram - with user decision support
-    # TODO: make retries and time out reasonable configurable parameters
+    # Handshake for 1 radiogram - with user decision support.
+    # Two phases: (A) send QTC, wait for ACK; (B) wait for "Ready to copy".
+    # We track whether phase A succeeded so that a retry after phase B failure
+    # only waits for "Ready to copy" again rather than re-sending a new QTC,
+    # which would confuse NTSGTE (it already processed our QTC and is waiting
+    # for the first radiogram line).
+    # TODO: make retries and timeouts configurable parameters
+    qtc_ack_ok = False  # True once NTSGTE has ACK'd our QTC
+
     while True:
-        status, info = qtc_handshake(
-            kiss,
-            my_call=my_call,
-            ax25_dest=ax25_dest,
-            digis=digis,
-            count=1,
-            log=log,
-            rxbuf=rxbuf,
-            max_tries=2,
-            ack_timeout=30.0,
-        )
+        if not qtc_ack_ok:
+            # Phase A+B: send QTC, wait for its ACK, then wait for Ready-to-copy.
+            status, info = qtc_handshake(
+                kiss,
+                my_call=my_call,
+                ax25_dest=ax25_dest,
+                digis=digis,
+                count=1,
+                log=log,
+                rxbuf=rxbuf,
+                max_tries=2,
+                ack_timeout=30.0,
+            )
 
-        if status == "ok":
-            break  # Handshake successful, proceed to sending lines
+            if status == "ok":
+                break  # Full handshake successful, proceed to sending lines
 
-        elif status == "await_user":
-            if ask_user_decision is None:
-                # No user decision callback, abort
-                log("STOP: QTC handshake failed (leaving in outbox).")
+            if status != "await_user":
+                log(f"STOP: unexpected handshake status {status!r} (leaving in outbox).")
                 return None
 
-            # Ask user what to do
-            decision = ask_user_decision(info)
-
-            if decision == "continue":
-                log("USER DECISION: Continue without QTC ACK (proceeding to send lines)")
-                break  # Proceed despite missing handshake ACK
-
-            elif decision == "retry":
-                log("USER DECISION: Retry QTC handshake")
-                continue  # Retry the handshake
-
-            else:  # "abort"
-                log("USER DECISION: Abort relay")
-                log("STOP: user aborted during QTC handshake (leaving in outbox).")
-                return None
+            # If phase B ("Ready to copy") failed, record that QTC was ACK'd so
+            # a retry only re-waits for the Ready-to-copy, not a new QTC.
+            if info.get("phase") == "ready_to_copy":
+                qtc_ack_ok = True
 
         else:
-            # Unknown status, abort
-            log(f"STOP: unknown status {status} during handshake (leaving in outbox).")
+            # Phase B only: QTC was already ACK'd by NTSGTE; just wait again
+            # for the "Ready to copy" message (NTSGTE may resend it on our ACK
+            # retry, or we may receive a copy that arrived late in the buffer).
+            log("Waiting again for 'Ready to copy' from NTSGTE (QTC already ACK'd)...")
+            ok = wait_for_ready_to_copy(
+                kiss,
+                my_call=my_call,
+                ax25_dest=ax25_dest,
+                digis=digis,
+                expected_n=1,
+                log=log,
+                rxbuf=rxbuf,
+                timeout=30.0,
+            )
+            if ok:
+                break  # Ready-to-copy received, proceed to sending lines
+
+            info = {
+                "phase": "ready_to_copy",
+                "line": "Ready to copy",
+                "msgid": "N/A",
+                "attempts": 1,
+                "timeout": 30.0,
+            }
+
+        # Reached here: need user decision before continuing.
+        if ask_user_decision is None:
+            log("STOP: QTC handshake failed (leaving in outbox).")
+            return None
+
+        decision = ask_user_decision(info)
+
+        if decision == "continue":
+            phase = info.get("phase", "qtc_ack")
+            if phase == "ready_to_copy":
+                log("USER DECISION: Continue — QTC was ACK'd; proceeding to send lines")
+            else:
+                log("USER DECISION: Continue without QTC ACK (proceeding to send lines)")
+            break
+
+        elif decision == "retry":
+            phase = info.get("phase", "qtc_ack")
+            if phase == "ready_to_copy":
+                log("USER DECISION: Retry waiting for 'Ready to copy' (QTC already ACK'd, not re-sending)")
+                # qtc_ack_ok remains True; next iteration only waits for Ready-to-copy
+            else:
+                log("USER DECISION: Retry full QTC handshake")
+                qtc_ack_ok = False  # Full retry: send a new QTC
+            continue
+
+        else:  # "abort"
+            log("USER DECISION: Abort relay")
+            log("STOP: user aborted during QTC handshake (leaving in outbox).")
             return None
 
     # Send each rendered payload line (N#, NA, N1.., NS..), waiting for ACK each time
